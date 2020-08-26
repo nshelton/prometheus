@@ -1,403 +1,127 @@
 ﻿using System;
 using System.IO;
-using h3 =  H3Standard.H3;
+using h3 = H3Standard.H3;
 using System.Collections.Generic;
 using System.Linq;
-
-using System.Drawing;
-using BitMiracle.LibTiff.Classic;
-using System.Linq.Expressions;
-using System.Text;
-using System.Diagnostics;
+using System.Threading.Tasks;
+using System.Threading;
 
 namespace prometheus
 {
 
     class Program
     {
+        public static long[] HEX_COUNTS = new long[]{
+            122,
+            842,
+            5882,
+            41162,
+            288122,
+            2016842,
+            14117882,
+            98825162,
+            691776122,
+            4842432842,
+            33897029882};
+        
+        private static void ClearConsoleLine()
+        {
+            Console.Write($"                                                                  \r");
+        }
 
-        static Random rand = new Random();
+        private static Dictionary<string, float> s_threadProgress = new Dictionary<string, float>();
+
+        private static string GetDatasetName()
+        {
+            return "testFullMultithread";
+        }
+
+        static GeoTiff m_raster;
         static void Main(string[] args)
         {
+            m_raster = new GeoTiff("D:\\sanctuary\\rasters\\populationData\\2010_30s.tif");
+            //m_raster = new GeoTiff("D:\\sanctuary\\rasters\\populationData\\2010_1.5m.tif");
+            //GeoTiff tiledPopulation = new GeoTiff("D:\\sanctuary\\rasters\\ppp_2020_1km_Aggregated.tif");
+            // m_raster = new GeoTiff("D:\\sanctuary\\rasters\\DEU_power-density_10m.tif");
 
-            string path = "D:\\sanctuary\\rasters\\populationData\\2010_1.5m.tif";
-         //  string path = "D:\\sanctuary\\rasters\\populationData\\2010_30s.tif";
+            Console.ForegroundColor = ConsoleColor.Yellow;
 
-           /// string path = "D:\\sanctuary\\rasters\\N - deposition1860.tif";
-
-
-
-            RasterData raster = new RasterData(path);
-
-            return;
-
-            for(int level = 1; level < 16; level++)
+            for (int level = 2; level < 9; level++)
             {
-                int hexlLevel = (int)(level * 0.7f) + 1;
-
-                //int hexlLevel = level;
-
-                int dim = (int)MathF.Pow(2, level);
-
-                int minHexes = (int)1e6;
-                int maxHexes = 0;
-
-                var startTime = DateTime.Now;
-
-                for (int ty = 0; ty < dim; ty++)
-                {
-                    for (int tx = 0; tx < dim; tx++)
-                    {
-                        var tile = new OSMTile(tx, ty, level);
-                        var hexes = GetHexes(tile, hexlLevel);
-                        ProcessTile(tile, hexes);
-                        minHexes = Math.Min(minHexes, hexes.Length);
-                        maxHexes = Math.Max(maxHexes, hexes.Length);
-                    }
-                }
-                var length = DateTime.Now - startTime;
-
-                Console.WriteLine($"LEVEL {level}\t{hexlLevel}\t{minHexes}\t{maxHexes}\t{length.TotalSeconds}");
-
+                EnumerateTilesAndSample(level, GetDatasetName());
             }
         }
 
-        private static void ProcessTile(OSMTile tile, ulong[] hexes)
+        private static void ProcessTile(OSMTile tile)
         {
-
-            var outputPath = $@"D:\sanctuary\web\hex\test3\{tile.level}_{tile.tx}_{tile.ty}.csv";
-
-            var lines = new List<string>();
-            float value = (float)rand.NextDouble();
-
-            value = value - MathF.Floor(value);
-
-
-            var valueEncoded = Convert.ToBase64String(BitConverter.GetBytes(value));
-
-            foreach (ulong h in hexes)
+            lock (s_threadProgress)
             {
-                string id = h3.H3ToString(h).TrimEnd('f') ;
-                lines.Add($"{id},{valueEncoded}");
+                s_threadProgress[$"{tile.tx},{tile.ty},{tile.level}"] = 0;
             }
 
-            File.WriteAllLines(outputPath, lines);
-
-        }
-
-        private static ulong[] GetHexes(OSMTile tile, int hexLevel)
-        {
-            float clat = (tile.minLat + tile.maxLat) / 2f;
-            float clon = (tile.minLon + tile.maxLon) / 2f;
-
-            ulong id = h3.GeoToH3(clat, clon, hexLevel);
-
-            // Get radius to each corner, take max
-            int maxRad = 0;
-            var e0 = h3.H3Distance(id, h3.GeoToH3(tile.minLat, tile.minLon, hexLevel));
-            maxRad = Math.Max(e0, maxRad);
-            var e1 = h3.H3Distance(id, h3.GeoToH3(tile.minLat, tile.maxLon, hexLevel));
-            maxRad = Math.Max(e1, maxRad);
-            var e2 = h3.H3Distance(id, h3.GeoToH3(tile.maxLat, tile.minLon, hexLevel));
-            maxRad = Math.Max(e2, maxRad);
-            var e3 = h3.H3Distance(id, h3.GeoToH3(tile.maxLat, tile.maxLon, hexLevel));
-            maxRad = Math.Max(e3, maxRad);
-
-
-            ulong[] ring = h3.GetKRing(id, maxRad);
-
-            if ( e0 < 0 || e1 < 0 || e2 < 0 || e3 < 0)
+            var startTime = DateTime.Now;
+            int hexesProcessed = 0;
+            long totalHexes = HEX_COUNTS[tile.level];
+            using (var hexTile = new HexTile(tile))
             {
-                {
-                    ulong idfucker = h3.GeoToH3(tile.minLat, tile.minLon, hexLevel);
-                    ulong[] ring2 = h3.GetKRing(idfucker, maxRad);
-                    ring = ring.Concat(ring2).ToArray();
-
-                }
-                {
-                    ulong idfucker = h3.GeoToH3(tile.minLat, tile.maxLon, hexLevel);
-                    ulong[] ring2 = h3.GetKRing(idfucker, maxRad);
-                    ring = ring.Concat(ring2).ToArray();
-
-
-                }
-                {
-                    ulong idfucker = h3.GeoToH3(tile.maxLat, tile.minLon, hexLevel);
-                    ulong[] ring2 = h3.GetKRing(idfucker, maxRad);
-                    ring = ring.Concat(ring2).ToArray();
-
-
-                }
-                {
-                    ulong idfucker = h3.GeoToH3(tile.maxLat, tile.maxLon, hexLevel);
-                    ulong[] ring2 = h3.GetKRing(idfucker, maxRad);
-                    ring = ring.Concat(ring2).ToArray();
-
-                }
-                ring = ring.Distinct().ToArray();
+                string name = GetDatasetName();
+                string threadName = $"{tile.tx},{tile.ty},{tile.level}";
+                hexesProcessed += hexTile.CollectAllPixels(m_raster, name, s_threadProgress, threadName);
             }
 
-
-            var subset = ring.Where(id => tile.Contains(id)).ToArray();
-            return subset;
+            lock (s_threadProgress)
+            {
+                s_threadProgress[$"{tile.tx},{tile.ty},{tile.level}"] = 1;
+            }
         }
 
-        private static List<OSMTile> EnumerateTiles(int level)
+        private static float GetProgress(int dim)
         {
-            int dim =  (int)MathF.Pow(2, level);
-            List<OSMTile> tiles = new List<OSMTile>() ;
+            float total = dim * dim;
+            float totalProgress = 0;
 
-            for(int tx = 0; tx < dim; tx++)
+            lock (s_threadProgress)
             {
-                for (int ty = 0; ty < dim; ty++)
+                foreach (var kvp in s_threadProgress)
                 {
+                    totalProgress += kvp.Value;
+                }
+            }
+            return totalProgress / total;
+        }
+
+        private static void EnumerateTilesAndSample(int level, string name)
+        {
+            var startTime = DateTime.Now;
+            int dim = (int)MathF.Pow(2, level);
+            List<Task> theTasks = new List<Task>();
+
+            for (int ty = 0; ty < dim; ty++)
+            {
+                for (int tx = 0; tx < dim; tx++)
+                { 
                     OSMTile t = new OSMTile(tx, ty, level);
-                    tiles.Add(t);
-                     
-
+                    theTasks.Add(Task.Factory.StartNew(() => ProcessTile(t)));
                 }
             }
 
-            return tiles;
-        }
+            var taskArray = theTasks.ToArray();
+            float progress = 0;
 
-        private static List<H3Hex> EnumerateHexes(int level)
-        {
-            string fileName = @"D:\sanctuary\pythonTools\" + level.ToString() + ".hexbin";
-            List<H3Hex> hexes = new List<H3Hex>();
-
-            using (BinaryReader reader = new BinaryReader(File.Open(fileName, FileMode.Open)))
+            while (progress < 100)
             {
-                int i = 0;
+                Thread.Sleep(100);
 
-                while (true)
-                {
-                    try
-                    {
-                        var hexID = reader.ReadInt64();
-                        var lon = reader.ReadSingle();
-                        var lat = reader.ReadSingle();
+                progress= GetProgress(dim) * 100;
 
-                        H3Hex h = new H3Hex(hexID, new GeoCoord(lat, lon));
-                        hexes.Add(h);
-
-
-
-                    }
-                    catch
-                    {
-                        break;
-                    }
-
-                }
+                ClearConsoleLine();
+                Console.Write($"LEVEL{level}:\t{progress:f2}% \t elapsed:{(DateTime.Now - startTime).TotalSeconds:f2}s\r");
             }
-            return hexes;
-        }
-    }
+            long numTiles = HEX_COUNTS[level];
+            Console.WriteLine();
+            Console.WriteLine($"LEVEL{level} \t WROTE\t {numTiles} hexagons into {dim} tile files");
 
-
-
-    class RasterData
-    {
-
-        private static Color getSample(int x, int y, int[] raster, int width, int height)
-        {
-            int index = (height - y - 1) * width + x;
-        //    int red = Tiff.GetR(raster[index]);
-       //     int green = Tiff.GetG(raster[index]);
-       //     int blue = Tiff.GetB(raster[index]);
-            return Color.FromArgb(0, 0, 0);
         }
 
-        public RasterData(string path)
-        {
-
-            using (Tiff image = Tiff.Open(path, "r"))
-            {
-                FieldValue[] value = image.GetField(TiffTag.IMAGEWIDTH);
-                int width = value[0].ToInt();
-
-                value = image.GetField(TiffTag.IMAGELENGTH);
-                int height = value[0].ToInt();
-
-                Console.WriteLine($"Width = {width}, Height = {height}");
-
-                foreach(var tag in Enum.GetValues(typeof(TiffTag)))
-                {
-                    TiffTag t = (TiffTag)tag;
-                    if (image.GetField(t) != null)
-                    {
-                        var fieldValue0 = image.GetField(t).GetValue(0);
-                        Console.WriteLine(tag + "\t" + fieldValue0);
-                    }
-                }
-
-                Console.WriteLine("CUSTOM TAGS: ");
-
-                TiffTag customTag0 = (TiffTag)33550; //ModelPixelScaleTag
-                TiffTag customTag1 = (TiffTag)33922; //ModelTiepointTag
-                TiffTag customTag2 = (TiffTag)34735; //GeoKeyDirectoryTag
-                TiffTag customTag3 = (TiffTag)34736; // GeoDoubleParamsTag
-                TiffTag customTag4 = (TiffTag)34737; //	GeoAsciiParamsTag
-                TiffTag GDAL_METADATA = (TiffTag)42112; //GDAL_METADATA
-                TiffTag GDAL_NODATA = (TiffTag)42113; // GDAL_NODATA
-
-                var tags = new TiffTag[]
-                {
-                    customTag0,customTag1, customTag2, customTag3, customTag4, GDAL_METADATA, GDAL_NODATA
-                };
-
-                Console.WriteLine("=== GDAL_METADATA");
-
-                FieldValue[] meta = image.GetField(GDAL_METADATA);
-                Console.WriteLine(Encoding.ASCII.GetString((byte[])meta[1].Value));
-
-                meta = image.GetField(GDAL_NODATA);
-                Console.WriteLine(BitConverter.ToDouble((byte[])meta[1].Value, 0));
-                Console.WriteLine(BitConverter.ToSingle((byte[])meta[1].Value, 0));
-
-                Console.WriteLine("=== All tags");
-
-                foreach (var t in tags)
-                {
-                    Console.WriteLine("CustomTag \t" + t);
-
-                    FieldValue[] values = image.GetField(t);
-
-                    foreach(var val in values)
-                    {
-                        var array = val.ToFloatArray();
-
-                        if (array != null)
-                        {
-                            Console.WriteLine("\t ToFloatArray is:");
-                            foreach(var element in array)
-                            {
-                                Console.WriteLine("\t\t" + element);
-                            }
-                        }
-                        else
-                            Console.WriteLine("\t ToFloatArray was null");
-                            Console.WriteLine("\t " + val);
-
-                    }
-
-                }
-
-
-
-                Console.ForegroundColor = ConsoleColor.Green;
-
-                byte[] tilebuf = new byte[image.TileSize()];
-
-                FieldValue[] result;
-
-                result = image.GetField(TiffTag.IMAGELENGTH);
-                int imagelength = result[0].ToInt();
-
-                result = image.GetField(TiffTag.IMAGEWIDTH);
-                int imagewidth = result[0].ToInt();
-
-                result = image.GetField(TiffTag.BITSPERSAMPLE);
-                short bps = result[0].ToShort();
-                Debug.Assert(bps % 8 == 0);
-
-                short bytes_per_sample = (short)(bps / 8);
-                Console.WriteLine(bytes_per_sample + "bytesPerSample");
-                int imagew = image.RasterScanlineSize();
-                int tilew = image.TileRowSize();
-
-                int spp = 1;
-                 
-
-
-
-
-                var byteBuffer = new byte[tilew];
-                int numRows = image.NumberOfStrips();
-                int goodSamples = 0;
-                int totalSamples = 0;
-
-                for (int rowNum = 0; rowNum < numRows; rowNum++)
-                {
-                    image.ReadScanline(byteBuffer, rowNum);
-                    for (int i = 0; i < byteBuffer.Length; i += bytes_per_sample)
-                    {
-                        float f = BitConverter.ToSingle(byteBuffer, i);
-
-                        if (f > 0)
-                            goodSamples++;
-                        totalSamples++;
-                    }
-                }
-
-                Console.WriteLine("good Samples" + goodSamples);
-                Console.WriteLine("total Samples" + totalSamples);
-              
-
-            }
-        }
-    }
-
-    internal class OSMTile 
-    {
-        public int tx;
-        public int ty;
-        public int level;
-        public List<H3Hex> hexes = new List<H3Hex>();
-
-        public float minLat;
-        public float minLon;
-        public float maxLat;
-        public float maxLon;
-
-
-
-        public OSMTile(int tx, int ty, int level)
-        {
-            this.tx = tx;
-            this.ty = ty;
-            this.level = level;
-
-            float[] extent = GeoTools.GetExtent(level, tx, ty);
-            this.minLat = MathF.Min(extent[0], extent[2]);
-            this.maxLat = MathF.Max(extent[0], extent[2]);
-
-            this.minLon = MathF.Min(extent[1], extent[3]);
-            this.maxLon = MathF.Max(extent[1], extent[3]);
-        }
-
-        public bool Contains(H3Hex hex) 
-        {
-            return
-                hex.center.latitude > this.minLat &&
-                hex.center.latitude < this.maxLat &&
-                hex.center.longitude < this.maxLon &&
-                hex.center.longitude > this.minLon;
-        }
-
-        public bool Contains(ulong hex)
-        {
-            (double latitude, double longitude) = h3.GetCenter(hex);
-
-            return
-                latitude > this.minLat &&
-                latitude < this.maxLat &&
-                longitude < this.maxLon &&
-                longitude > this.minLon;
-        }
-    }
-
-    internal class H3Hex
-    {
-        public long id;
-        public GeoCoord center;
-        public OSMTile tile;
-
-        public H3Hex(long hexID, GeoCoord geoCoord)
-        {
-            this.id = hexID;
-            this.center = geoCoord;
-        }
     }
 }
