@@ -33,30 +33,49 @@ namespace prometheus
 
         private static string GetDatasetName()
         {
-            return "testFullMultithread";
+            return "Tiled3";
         }
 
         static GeoTiff m_raster;
         static void Main(string[] args)
         {
-            m_raster = new GeoTiff("D:\\sanctuary\\rasters\\populationData\\2010_30s.tif");
-            //m_raster = new GeoTiff("D:\\sanctuary\\rasters\\populationData\\2010_1.5m.tif");
-            //GeoTiff tiledPopulation = new GeoTiff("D:\\sanctuary\\rasters\\ppp_2020_1km_Aggregated.tif");
-            // m_raster = new GeoTiff("D:\\sanctuary\\rasters\\DEU_power-density_10m.tif");
+           // m_raster = new GeoTiff("D:\\sanctuary\\rasters\\populationData\\2010_30s.tif");
+           // m_raster = new GeoTiff("D:\\sanctuary\\rasters\\populationData\\2010_1.5m.tif");
+          //  m_raster = new GeoTiff("D:\\sanctuary\\rasters\\ppp_2020_1km_Aggregated.tif");
+            //m_raster = new GeoTiff("D:\\sanctuary\\rasters\\DEU_power-density_10m.tif");
+            m_raster = new GeoTiff("D:\\sanctuary\\rasters\\gebco_2020_geotiff\\gebco_2020_n90.0_s0.0_w-180.0_e-90.0.tif");
 
-            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.ForegroundColor = ConsoleColor.DarkCyan;
 
-            for (int level = 2; level < 9; level++)
-            {
-                EnumerateTilesAndSample(level, GetDatasetName());
-            }
+               for (int level = 4; level <5; level++)
+                {
+                    EnumerateTilesAndSample(level, GetDatasetName());
+                    //EnumerateTilesAndSampleSingleThreaded(level, GetDatasetName());
+                }
+        
+               
+               /*
+                //TEST 
+            OSMTile t = new OSMTile(8, 7, 4);
+            
+            var hexTile = new HexTile(t);
+
+          //hexTile.CollectAllPixels(m_raster, GetDatasetName(), s_threadProgress, "--");
+          hexTile.SampleCentersAndWrite(m_raster, GetDatasetName());
+
+           //hexTile.WriteOnes(GetDatasetName());
+
+            Console.Write($"Wrote 4.10.10");
+               */
         }
 
         private static void ProcessTile(OSMTile tile)
         {
+            string threadName = $"{tile.tx},{tile.ty},{tile.level}";
+
             lock (s_threadProgress)
             {
-                s_threadProgress[$"{tile.tx},{tile.ty},{tile.level}"] = 0;
+                s_threadProgress[threadName] = 0;
             }
 
             var startTime = DateTime.Now;
@@ -65,14 +84,15 @@ namespace prometheus
             using (var hexTile = new HexTile(tile))
             {
                 string name = GetDatasetName();
-                string threadName = $"{tile.tx},{tile.ty},{tile.level}";
-                hexesProcessed += hexTile.CollectAllPixels(m_raster, name, s_threadProgress, threadName);
+                //hexesProcessed += hexTile.CollectAllPixels(m_raster, name, s_threadProgress, threadName);
+                hexesProcessed += hexTile.SampleCentersAndWrite(m_raster, name);
             }
 
             lock (s_threadProgress)
             {
-                s_threadProgress[$"{tile.tx},{tile.ty},{tile.level}"] = 1;
+                s_threadProgress[threadName] = 1;
             }
+
         }
 
         private static float GetProgress(int dim)
@@ -94,18 +114,19 @@ namespace prometheus
         {
             var startTime = DateTime.Now;
             int dim = (int)MathF.Pow(2, level);
-            List<Task> theTasks = new List<Task>();
+            Task[] taskArray = new Task[dim * dim];
 
-            for (int ty = 0; ty < dim; ty++)
+            int i = 0;
+            for (int ty = dim/4; ty < dim; ty++)
             {
                 for (int tx = 0; tx < dim; tx++)
                 { 
                     OSMTile t = new OSMTile(tx, ty, level);
-                    theTasks.Add(Task.Factory.StartNew(() => ProcessTile(t)));
+                    taskArray[i] = Task.Factory.StartNew(() => ProcessTile(t));
+                    i++;
                 }
             }
 
-            var taskArray = theTasks.ToArray();
             float progress = 0;
 
             while (progress < 100)
@@ -119,8 +140,29 @@ namespace prometheus
             }
             long numTiles = HEX_COUNTS[level];
             Console.WriteLine();
-            Console.WriteLine($"LEVEL{level} \t WROTE\t {numTiles} hexagons into {dim} tile files");
+            Console.WriteLine($"LEVEL{level} \t WROTE\t {numTiles:N} hexagons into {dim * dim} tile files");
 
+        }
+         
+
+        private static void EnumerateTilesAndSampleSingleThreaded(int level, string name)
+        {
+            var startTime = DateTime.Now;
+            int dim = (int)MathF.Pow(2, level);
+
+            int i = 0;
+
+            for (int ty = 0; ty < dim; ty++)
+            {
+                for (int tx = 0; tx < dim; tx++)
+                {
+                    OSMTile t = new OSMTile(tx, ty, level);
+                    ProcessTile(t);
+
+                    i++;
+                    Console.Write($"LEVEL{level}:\t{100f * (float)i / (float)(dim * dim):f2}% \t elapsed:{(DateTime.Now - startTime).TotalSeconds:f2}s\r");
+                }
+            }
         }
 
     }

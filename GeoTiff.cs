@@ -36,7 +36,7 @@ namespace prometheus
 
         private int TileSize = -1;
 
-        private int MAX_CACHE_LENGTH = 4096;
+        private int MAX_CACHE_LENGTH = 2048;
 
         private Dictionary<int, byte[]> m_scanlineCache = new Dictionary<int, byte[]>();
         private Dictionary<int, DateTime> m_lastAccessTime = new Dictionary<int, DateTime>();
@@ -103,15 +103,10 @@ namespace prometheus
 
                 Console.WriteLine($"Tiles are {m_tileW}x{m_tileH}");
                 Debug.Assert(m_tileW * m_tileH * SamplesPerPixel * BytesPerSample == TileSize);
-
-                float val = SampleFloatTiled(10240, 10240);
-
             }
-            else
-            {
-                MaxValue = 468927.88f;// FindMaxValue();
-                Console.WriteLine("MaxValue: {0}", MaxValue);
-            }
+
+            MaxValue = 468927.88f;// FindMaxValue();
+            Console.WriteLine("MaxValue: {0}", MaxValue);
 
             // Get Transformation Matrix
             Console.Write("GEOTIFF_MODELPIXELSCALETAG\t");
@@ -197,46 +192,59 @@ namespace prometheus
             int py;
             (px, py) = LatLonToPixel(lat, lon);
 
-            lock (m_scanlineCache)
+            if ( Mode == OrgMode.Striped)
             {
-                if (!m_scanlineCache.ContainsKey(py))
+                lock (m_scanlineCache)
                 {
-                    m_scanlineCache[py] = new byte[TileSize];
-                    Image.ReadScanline(m_scanlineCache[py], py);
-                    m_lastAccessTime[py] = DateTime.Now;
-
-                    if (m_scanlineCache.Count > MAX_CACHE_LENGTH)
+                    if (!m_scanlineCache.ContainsKey(py))
                     {
-                        DropOldestCacheEntry();
+                        m_scanlineCache[py] = new byte[TileSize];
+                        Image.ReadScanline(m_scanlineCache[py], py);
+                        m_lastAccessTime[py] = DateTime.Now;
+
+                        if (m_scanlineCache.Count > MAX_CACHE_LENGTH)
+                        {
+                            DropOldestCacheEntry();
+                        }
                     }
                 }
+
+                //Image.ReadScanline(m_scanLineBuffer, py);
+
+                int offset = SamplesPerPixel * BytesPerSample * px;
+                float value = BitConverter.ToSingle(m_scanlineCache[py], offset);
+
+                // TODO chaeck GDAL_NODATA value here
+                if (value < 0)
+                    value = 0;
+
+                value /= MaxValue;
+
+                return value;
+
+            } else if ( Mode == OrgMode.Tiled)
+            {
+                return SampleFloatTiled(px, py);
             }
-
-            //Image.ReadScanline(m_scanLineBuffer, py);
-
-            int offset = SamplesPerPixel * BytesPerSample * px;
-            float value = BitConverter.ToSingle(m_scanlineCache[py], offset);
-
-            // TODO chaeck GDAL_NODATA value here
-            if (value < 0)
-                value = 0;
-
-            value /= MaxValue;
-
-            return value;
+            else
+            {
+                Console.WriteLine("Unknown TIFF mode");
+                return -1;
+            }
         }
-
 
         public (int, int) LatLonToPixel(double lat, double lon)
         {
-            int px = (int)((lon + 180) / xScale);
+            // wrap x
+            int px = (int)((lon + -xTranslation) / xScale);
             if (px < 0)
                 px += Width;
 
             if (px > Width)
                 px -= Width;
 
-            int py = Height - (int)((lat + 90) / yScale) + 1;
+            // clamp y
+            int py = Height - (int)((lat + yTranslation) / yScale) + 1;
             if (py < 0)
                 py = 0;
             if (py >= Height)
@@ -247,8 +255,8 @@ namespace prometheus
         }
         public (double, double) PixelToLatLon(int px, int py)
         {
-            double lon = px * xScale - 180;
-            double lat = (Height - (py - 1)) * yScale - 90;
+            double lon = px * xScale + xTranslation;
+            double lat = (Height - (py - 1)) * yScale - yTranslation;
             return (lat, lon);
         }
 
@@ -259,18 +267,31 @@ namespace prometheus
             int py;
             (px, py) = LatLonToPixel(lat, lon);
 
-            Image.ReadScanline(m_scanLineBuffer, py);
+            if ( Mode == OrgMode.Striped)
+            {
+                Image.ReadScanline(m_scanLineBuffer, py);
 
-            int offset = SamplesPerPixel * BytesPerSample * px;
-            float value = BitConverter.ToSingle(m_scanLineBuffer, offset);
+                int offset = SamplesPerPixel * BytesPerSample * px;
+                float value = BitConverter.ToSingle(m_scanLineBuffer, offset);
 
-            // TODO chaeck GDAL_NODATA value here
-            if (value < 0)
-                value = 0;
+                // TODO chaeck GDAL_NODATA value here
+                if (value < 0)
+                    value = 0;
 
-            value /= MaxValue;
+                value /= MaxValue;
 
-            return value;
+                return value;
+            }
+            else if (Mode == OrgMode.Tiled)
+            {
+                return SampleFloatTiled(px, py);
+            }
+            else
+            {
+                Console.WriteLine("Unknown TIFF mode");
+                return -1;
+            }
+
         }
 
         private void DropOldestCacheEntry()
@@ -279,16 +300,22 @@ namespace prometheus
             double maxAge = 0;
             int oldestKey = -1;
             var now = DateTime.Now;
-            foreach(var kvp in m_lastAccessTime)
+            lock (m_lastAccessTime)
             {
-                double duration = (now - kvp.Value).TotalMilliseconds;
-                if (duration > maxAge)
+
+                foreach (var kvp in m_lastAccessTime)
                 {
-                    maxAge = duration;
-                    oldestKey = kvp.Key;
+                    double duration = (now - kvp.Value).TotalMilliseconds;
+                    if (duration > maxAge)
+                    {
+                        maxAge = duration;
+                        oldestKey = kvp.Key;
+                    }
                 }
+
+                m_lastAccessTime.Remove(oldestKey);
             }
-            m_lastAccessTime.Remove(oldestKey);
+
             m_scanlineCache.Remove(oldestKey);
         }
 
@@ -328,25 +355,57 @@ namespace prometheus
 
         private float SampleFloatTiled(int x, int y)
         {
-            /*     
             int tileNum = Image.ComputeTile(x, y, 0, 0);
-            Image.ReadEncodedTile(tileNum, m_byteBuffer, 0, m_byteBuffer.Length);
 
             int nTilesX = (int)MathF.Ceiling(Width / m_tileW);
             int nTilesY = (int)MathF.Ceiling(Height / m_tileH);
 
-            int fullwidth = nTilesX * m_tileW;
-            int fullHeight = nTilesY * m_tileH;
-
             int tx = (int)MathF.Floor((float)x / m_tileW);
             int ty = (int)MathF.Floor((float)y / m_tileH);
 
-            int computed = (tx) + ty * (nTilesX );
-            Console.WriteLine("lib says " + tileNum);
-            Console.WriteLine("me syas " + computed);
-            */
+             tileNum = (tx) + ty * (nTilesX);
 
-            return 0f;
+            if (tileNum >= Image.NumberOfTiles() || tileNum < 0)
+                return 0.0f;
+
+            bool inCache = false;
+
+            lock (m_scanlineCache)
+            {
+                inCache = m_scanlineCache.ContainsKey(tileNum);
+            }
+
+            float value = 0;
+
+
+            lock (m_scanlineCache)
+            {
+                if (!inCache)
+                {
+                    m_scanlineCache[tileNum] = new byte[TileSize];
+                    Image.ReadTile(m_scanlineCache[tileNum], 0, x, y, 0, 0);
+
+                    if (m_scanlineCache.Count > MAX_CACHE_LENGTH)
+                    {
+                        DropOldestCacheEntry();
+                    }
+                }
+                int tyStart = m_tileH * ty;
+                int txStart = m_tileW * tx;
+
+                int offset = SamplesPerPixel * BytesPerSample * ((x - txStart) + (y - tyStart) * m_tileW);
+
+                value = BitConverter.ToSingle(m_scanlineCache[tileNum], offset);
+            }
+
+
+            lock (m_lastAccessTime)
+            {
+                m_lastAccessTime[tileNum] = DateTime.Now;
+            }
+
+            value /= MaxValue ;
+            return value;
         }
         private void ReadAllTiled()
         {

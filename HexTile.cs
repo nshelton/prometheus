@@ -68,6 +68,18 @@ namespace prometheus
             this.Hexes = hexes.ToArray();
         }
 
+        public void WriteOnes(string dir)
+        {
+
+            this.Hexes = GeoTools.GetHexes(new OSMTile(Tx, Ty, Level), Level);
+           foreach (var h in this.Hexes)
+            {
+                h.Value = 1.0f;
+            }
+
+            WriteValues(dir);
+        }
+
         public int CollectAllPixels(GeoTiff raster, string outFolder, Dictionary<string, float> progress, string threadname)
         {
             var hexes = GeoTools.GetHexes(new OSMTile(Tx, Ty, Level), Level);
@@ -86,7 +98,6 @@ namespace prometheus
             pxMax = Math.Max(px0, px1);
             pyMin = Math.Min(py0, py1);
             pyMax = Math.Max(py0, py1);
-         //   Console.WriteLine($"\tPixel\t{pxMin},{pyMin}x{pxMax},{pyMax}\t{pxMax - pxMin}x{pyMax - pyMin}");
 
             int padding = 10;
             double lat, lon;
@@ -94,51 +105,63 @@ namespace prometheus
 
             Dictionary<ulong, int> counts = new Dictionary<ulong, int>();
             Dictionary<ulong, float> sums = new Dictionary<ulong, float>();
-            for (int i = 0; i < hexes.Length; i++)
-            {
-                sums[hexes[i].id] = 0;
-                counts[hexes[i].id] = 0;
-            }
-
-            int numpixels = ((pyMax + padding) - (pyMin - padding)) * ((pxMax + padding) - (pxMin - padding));
-            int pp = 0;
-
-            for (int py = pyMin - padding; py < pyMax + padding; py++)
-            {
-                for (int px = pxMin - padding; px < pxMax + padding; px++)
-                {
-                    if ( px >= 0 && py >= 0 && px < raster.Width && py < raster.Height)
-                    {
-                        (lat, lon) = raster.PixelToLatLon(px, py);
-                        h3ID = h3.GeoToH3(lat, lon, Level);
-
-                        if (counts.ContainsKey(h3ID))
-                        {
-                            counts[h3ID]++;
-                            sums[h3ID] += raster.SampleLatLonCached(lat, lon);
-                        }
-                    }
-                    pp++;
-
-                }
-
-                lock (progress)
-                {
-                    progress[threadname] = (float)pp / (float)numpixels;
-                }
-            }
-
+            
             var lines = new List<string>();
-            for (int i = 0; i < hexes.Length; i++)
-            {
-                ulong h = hexes[i].id;
 
-                if (sums[h] > 0 && counts[h]> 0)
+            lock (counts)
+            {
+
+                for (int i = 0; i < hexes.Length; i++)
                 {
-                    float val = sums[h] / (float)counts[h];
-                    var valueEncoded = Convert.ToBase64String(BitConverter.GetBytes(val));
-                    string id = h3.H3ToString(h).TrimEnd('f');
-                    lines.Add($"{id},{valueEncoded}");
+                    sums[hexes[i].id] = 0;
+                    counts[hexes[i].id] = 0;
+                }
+
+                int numpixels = ((pyMax + padding) - (pyMin - padding)) * ((pxMax + padding) - (pxMin - padding));
+                int pp = 0;
+
+                for (int py = pyMin - padding; py < pyMax + padding; py++)
+                {
+                    for (int px = pxMin - padding; px < pxMax + padding; px++)
+                    {
+                        if (px >= 0 && py >= 0 && px < raster.Width && py < raster.Height)
+                        {
+                            (lat, lon) = raster.PixelToLatLon(px, py);
+                            h3ID = h3.GeoToH3(lat, lon, Level);
+
+                            if (counts.ContainsKey(h3ID))
+                            {
+                                float val = raster.SampleLatLonCached(lat, lon);
+                                if (val < 0)
+                                    val = 0;
+
+                                counts[h3ID]++;
+                                sums[h3ID] += val;
+                            }
+                        }
+
+                        pp++;
+
+                    }
+
+                    lock (progress)
+                    {
+                        progress[threadname] = (float)pp / (float)numpixels;
+                    }
+                }
+
+
+                for (int i = 0; i < hexes.Length; i++)
+                {
+                    ulong h = hexes[i].id;
+
+                    if (sums[h] > 0 && counts[h] > 0)
+                    {
+                        float val = sums[h] / (float)counts[h];
+                        var valueEncoded = Convert.ToBase64String(BitConverter.GetBytes(val));
+                        string id = h3.H3ToString(h).TrimEnd('f');
+                        lines.Add($"{id},{valueEncoded}");
+                    }
                 }
             }
 
@@ -151,7 +174,6 @@ namespace prometheus
         public int SampleCentersAndWrite(GeoTiff raster, string outFolder)
         {
             var hexes = GeoTools.GetHexes(new OSMTile(Tx,Ty,Level), Level);
-
             var lines = new List<string>();
             for (int i = 0; i < hexes.Length; i++)
             {
